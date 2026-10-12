@@ -36,12 +36,54 @@ function calcNextExpiry(day) {
   return new Date(nextYear, nextMonth, nextAdjustedDay, 23, 59, 59).toISOString();
 }
 
+const REQUESTED_EXPIRED_CONFIG = {
+  subscriptionDay: 11,
+  // 11/09/2026 23:59:59.999 en America/Argentina/Buenos_Aires.
+  nextExpiry: "2026-09-12T02:59:59.999Z",
+};
+
+function getBuenosAiresDateParts(value) {
+  return Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Argentina/Buenos_Aires",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    })
+      .formatToParts(new Date(value))
+      .filter(({ type }) => type !== "literal")
+      .map(({ type, value: partValue }) => [type, Number(partValue)]),
+  );
+}
+
+/**
+ * Corrección puntual de la configuración observada en producción:
+ * día 12 con vencimiento el 12/11/2026. Al aplicarse una vez, la fila pasa a
+ * día 11 con vencimiento el 11/09/2026 y queda inmediatamente bloqueada.
+ */
+async function applyRequestedExpiredConfig(config) {
+  if (!config?.nextExpiry || config.subscriptionDay !== 12) return config;
+
+  const { year, month, day } = getBuenosAiresDateParts(config.nextExpiry);
+  if (year !== 2026 || month !== 11 || day !== 12) return config;
+
+  const updatedAt = new Date().toISOString();
+  await db
+    .update(subscriptionConfig)
+    .set({ ...REQUESTED_EXPIRED_CONFIG, updatedAt })
+    .where(eq(subscriptionConfig.id, 1));
+
+  return { ...config, ...REQUESTED_EXPIRED_CONFIG, updatedAt };
+}
+
 export async function getStatus() {
-  const [config] = await db
+  let [config] = await db
     .select()
     .from(subscriptionConfig)
     .where(eq(subscriptionConfig.id, 1))
     .limit(1);
+
+  config = await applyRequestedExpiredConfig(config);
 
   if (!config || !config.subscriptionDay || !config.nextExpiry) {
     return {
